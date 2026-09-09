@@ -1,0 +1,102 @@
+# TEMPORARY debug workflow (throwaway branch debug/win-h2-crash).
+# Reproduces the Windows/Node 25 native crash of test/http2-request-never-settles.js
+# seen on PR #5782 (run 34121099898). Runs ONLY that one test, looped in parallel
+# to starve the CPU (the nodejs/node#64841 Maglev trigger), and uploads any V8
+# fatal-error report so the native stack can be inspected. Do not merge.
+name: debug-h2-crash
+
+on:
+  push:
+    branches:
+      - debug/win-h2-crash
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: outer iterations
+        default: "60"
+      parallel:
+        description: parallel node processes per iteration
+        default: "6"
+
+permissions:
+  contents: read
+
+jobs:
+  repro:
+    name: repro ${{ matrix.label }}
+    runs-on: windows-latest
+    env:
+      HUSKY: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { flags: "", label: "default" }
+          - { flags: "--no-maglev", label: "no-maglev" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "25"
+      - name: versions
+        run: |
+          node --version
+          node -p "process.platform + ' ' + process.arch"
+      - name: install deps
+        run: npm install --no-audit --no-fund
+      - name: loop the churn test capturing fatal reports
+        shell: pwsh
+        env:
+          ITER: ${{ github.event.inputs.iterations || '60' }}
+          PAR: ${{ github.event.inputs.parallel || '6' }}
+          NODEFLAGS: ${{ matrix.flags }}
+        run: |
+          $iter = [int]$env:ITER
+          $par  = [int]$env:PAR
+          $rep  = "reports"
+          New-Item -ItemType Directory -Force -Path $rep | Out-Null
+          Write-Host "iterations=$iter parallel=$par flags='$($env:NODEFLAGS)' node=$(node --version)"
+          $crashed = $false
+          for ($i = 1; $i -le $iter -and -not $crashed; $i++) {
+            $procs = @()
+            for ($p = 1; $p -le $par; $p++) {
+              $a = @()
+              if ($env:NODEFLAGS) { $a += $env:NODEFLAGS }
+              $a += "--expose-gc"
+              $a += "--report-on-fatalerror"
+              $a += "--report-directory=$rep"
+              $a += "--report-filename=r$i-p$p.json"
+              $a += "test/http2-request-never-settles.js"
+              $procs += Start-Process -FilePath "node" -ArgumentList $a -PassThru -NoNewWindow `
+                          -RedirectStandardError  "$rep/stderr-r$i-p$p.txt" `
+                          -RedirectStandardOutput "$rep/stdout-r$i-p$p.txt"
+            }
+            foreach ($proc in $procs) {
+              $proc.WaitForExit()
+              $code = $proc.ExitCode
+              if ($code -ne 0) {
+                Write-Host ("iter {0}: exit {1} (0x{2:X8})" -f $i, $code, ($code -band 0xFFFFFFFF))
+                if ($code -ne 1) { $crashed = $true }
+              }
+            }
+            if (Get-ChildItem -Path $rep -Filter *.json -ErrorAction SilentlyContinue) {
+              Write-Host "iter ${i}: a V8 fatal-error report was written"
+              $crashed = $true
+            }
+          }
+          if ($crashed) {
+            Write-Host "== REPRODUCED (flags='$($env:NODEFLAGS)') =="
+          } else {
+            Write-Host "== no crash in $iter x $par runs (flags='$($env:NODEFLAGS)') =="
+          }
+      - name: list captured files
+        if: always()
+        shell: pwsh
+        run: if (Test-Path reports) { Get-ChildItem -Recurse reports | Format-Table Name,Length } else { Write-Host "no reports dir" }
+      - name: upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: h2-crash-${{ matrix.label }}
+          path: reports/
+          if-no-files-found: warn
