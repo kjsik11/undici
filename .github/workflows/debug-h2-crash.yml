@@ -1,8 +1,11 @@
 # TEMPORARY debug workflow (throwaway branch debug/win-h2-crash).
-# Reproduces the Windows/Node 25 native crash of test/http2-request-never-settles.js
-# seen on PR #5782 (run 34121099898). Runs ONLY that one test, looped in parallel
-# to starve the CPU (the nodejs/node#64841 Maglev trigger), and uploads any V8
-# fatal-error report so the native stack can be inspected. Do not merge.
+# Verifies whether test/http2-request-never-settles.js crashes on Windows for
+# different Node majors, to decide the skip matrix. Runs ONLY that one test,
+# looped in parallel to starve the CPU (the nodejs/node#64841 trigger).
+#   - n24-latest      : latest 24.x (has the #64166 fix) = what undici CI uses -> expect clean
+#   - n24-18-1-prefix : 24.18.1 (pre-fix)                                       -> expect clean (pacocartones: 0/72)
+#   - n25-control     : 25.x (EOL, no fix)                                      -> expect crash (validates the setup)
+# Do not merge.
 name: debug-h2-crash
 
 on:
@@ -31,13 +34,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { flags: "", label: "default" }
-          - { flags: "--no-maglev", label: "no-maglev" }
+          - { nodev: "24", flags: "", label: "n24-latest" }
+          - { nodev: "24.18.1", flags: "", label: "n24-18-1-prefix" }
+          - { nodev: "25", flags: "", label: "n25-control" }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "25"
+          node-version: ${{ matrix.nodev }}
       - name: versions
         run: |
           node --version
@@ -85,9 +89,9 @@ jobs:
             }
           }
           if ($crashed) {
-            Write-Host "== REPRODUCED (flags='$($env:NODEFLAGS)') =="
+            Write-Host "== REPRODUCED (node=$(node --version) flags='$($env:NODEFLAGS)') =="
           } else {
-            Write-Host "== no crash in $iter x $par runs (flags='$($env:NODEFLAGS)') =="
+            Write-Host "== no crash in $iter x $par runs (node=$(node --version) flags='$($env:NODEFLAGS)') =="
           }
       - name: list captured files
         if: always()
